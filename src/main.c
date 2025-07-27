@@ -2,6 +2,7 @@
 #include <avr/io.h>        // Доступ до портів вводу/виводу
 #include <util/delay.h>    // Функції затримки
 #include <stdlib.h>        // Стандартні функції (itoa, abs тощо)
+#include <avr/interrupt.h> // Функції апаратних переривань
 
 // Визначення пінів підключення LCD дисплея
 #define LCD_RS PB4
@@ -26,6 +27,10 @@
 #define USART_RX PD0        
 #define USART_TX PD1
 #define RS485_DA PD2
+
+volatile char rxbuff[32];
+volatile uint8_t rxpos = 0;
+volatile uint8_t MSG_RES = 0;
 
 // Коефіцієнт масштабування (визначається експериментально, перетворює значення ΔP у кПа)
 #define SCALE_FACTOR 10000.0
@@ -52,10 +57,11 @@ static void rs485_init(void)
     UBRR0L = ubrr;
     UCSR0B = (1 << RXEN0) | (1 << TXEN0);
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);    
+    sei();
 }
 
 //Функція відправки повідомлення
-static void rs485_send(const char *msg)
+static void rs485_send(const volatile char *msg)
 {
     PORTD |= (1 << RS485_DA);
     _delay_us(50);
@@ -71,6 +77,18 @@ static void rs485_send(const char *msg)
     PORTD &= ~(1 << RS485_DA);
 }
 
+
+ISR(USART_RX_vect)
+{
+    char c = UDR0;
+    if(rxpos < sizeof(rxbuff)-1) rxbuff[rxpos++] = c;
+    if(c == '\n')
+    {
+        rxbuff[rxpos] = '\0';
+        MSG_RES = 1;
+        rxpos = 0;
+    }
+}
 
 //Функція отримання повідомлення
 static int rs485_readln(char *buf, int maxlen)
@@ -196,6 +214,7 @@ int main(void) {
     lcd_init();       // Запуск LCD
     hx710b_init();    // Ініціалізація сенсорів тиску
     motor_init();     // Підготовка двигуна
+    rs485_init();     // Ініціалізація протоколу
 
     lcd_set_cursor(0, 0);
     lcd_write_string("Calibrating..."); // Повідомлення на дисплеї
@@ -203,9 +222,15 @@ int main(void) {
     uint32_t offset2 = filtered_avg(HX_DT2);
     lcd_command(0x01); // Очистити екран
 
+    rs485_send("Pressure control is OK");
+
     char buf[16]; // Буфер для тексту
 
     while (1) {
+        if(MSG_RES == 1)
+        {
+            rs485_send(rxbuff);
+        }
         _delay_ms(500); // Період оновлення 500 мс
 
         // Зчитування та розрахунок різниці тиску
@@ -220,6 +245,8 @@ int main(void) {
         dtostrf(pressure_kpa, 5, 2, buf); // Перетворення float → текст
         lcd_write_string(buf);
         lcd_write_string(" kPa ");
+
+        
 
         // Якщо тиск перевищує поріг — прокручуємо мотор
         if (pressure_kpa > 0.10 || pressure_kpa < -0.10) {
